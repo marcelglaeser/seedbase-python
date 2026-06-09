@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "seedbase"
+version = "0.1.0"
+description = "Generate realistic test data for your databases. Schema-aware, relationship-preserving, privacy-safe."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Seedbase", email = "hello@seedba.se"},
+]
+keywords = ["testing", "test-data", "database", "synthetic-data", "data-generation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://seedba.se"
+Documentation = "https://docs.seedba.se"
+Repository = "https://github.com/marcelglaeser/seedbase-python"
+Changelog = "https://github.com/marcelglaeser/seedbase-python/blob/master/CHANGELOG.md"
+
+[project.scripts]
+seedbase = "seedbase.cli:main"
+
+[project.entry-points.pytest11]
+seedbase = "seedbase.pytest_plugin"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+exclude = ["seedbase.tests*"]
