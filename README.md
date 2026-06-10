@@ -25,7 +25,7 @@ seedbase generate --seed 42    # trigger a generation on the platform
 seedbase pull all              # write schema + data into your target DB
 ```
 
-The CLI is pull-oriented: schema and datasets live on the platform, you pull them into your database. Other commands: `projects`, `generations`, `pull schema|data`, `diff`, `export config`, `import config`.
+The CLI is pull-oriented: schema and datasets live on the platform, you pull them into your database. Other commands: `projects`, `generations`, `connections`, `pull schema|data|subset`, `mask`, `db-push`, `diff`, `export config`, `import config`.
 
 ## Python SDK
 

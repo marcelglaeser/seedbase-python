@@ -5,14 +5,23 @@ from typing import Any
 
 import pytest
 
-from .sdk import API_URL, SeedbaseClient, SeedbaseError
+from .sdk import (
+    API_URL,
+    DEFAULT_GENERATION_TIMEOUT,
+    DEFAULT_REQUEST_TIMEOUT,
+    SeedbaseClient,
+    SeedbaseError,
+    _validate_api_url,
+)
 
 _ENV_TOKEN = "SEEDBASE_TOKEN"
 _ENV_API_URL = "SEEDBASE_API_URL"
+_ENV_TIMEOUT = "SEEDBASE_TIMEOUT"
 _ENV_PROJECT = "SEEDBASE_PROJECT"
 _ENV_SEED = "SEEDBASE_SEED"
 _ENV_ROWS = "SEEDBASE_ROWS"
 _ENV_FORMAT = "SEEDBASE_FORMAT"
+_ENV_GENERATION_TIMEOUT = "SEEDBASE_GENERATION_TIMEOUT"
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -36,6 +45,11 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addini("seedbase_seed", "Deterministic generation seed.", default="")
     parser.addini("seedbase_rows", "Rows per table for the generation.", default="")
     parser.addini("seedbase_format", "Export format for downloads.", default="")
+    parser.addini(
+        "seedbase_generation_timeout",
+        "Seconds to wait for a generation to complete.",
+        default="",
+    )
 
 
 def _resolve(config: pytest.Config, option: str, ini: str, env: str) -> str | None:
@@ -52,11 +66,12 @@ def _resolve(config: pytest.Config, option: str, ini: str, env: str) -> str | No
 
 
 def _resolve_api_url(config: pytest.Config) -> str:
-    return (
+    api_url = (
         os.getenv(_ENV_API_URL)
         or (config.getini("seedbase_api_url") or "")
         or API_URL
     )
+    return _validate_api_url(api_url)
 
 
 def _resolve_project(config: pytest.Config) -> str | None:
@@ -87,12 +102,32 @@ def _resolve_format(config: pytest.Config) -> str | None:
     return (config.getini("seedbase_format") or "") or os.getenv(_ENV_FORMAT) or None
 
 
+def _resolve_generation_timeout(config: pytest.Config) -> int:
+    raw = (config.getini("seedbase_generation_timeout") or "") or os.getenv(_ENV_GENERATION_TIMEOUT)
+    if not raw:
+        return DEFAULT_GENERATION_TIMEOUT
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        raise SeedbaseError(f"Invalid seedbase generation timeout: {raw!r}")
+
+
+def _resolve_timeout() -> float:
+    raw = os.getenv(_ENV_TIMEOUT)
+    if not raw:
+        return DEFAULT_REQUEST_TIMEOUT
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        raise SeedbaseError(f"Invalid seedbase timeout: {raw!r}")
+
+
 @pytest.fixture(scope="session")
 def seedbase_client(pytestconfig: pytest.Config) -> SeedbaseClient:
     token = os.getenv(_ENV_TOKEN)
     api_url = _resolve_api_url(pytestconfig)
     try:
-        return SeedbaseClient(token=token, api_url=api_url)
+        return SeedbaseClient(token=token, api_url=api_url, request_timeout=_resolve_timeout())
     except SeedbaseError as exc:
         pytest.skip(
             f"SeedBase credentials missing: {exc}. "
@@ -120,6 +155,7 @@ def seedbase_generation(
     seed = _resolve_seed(pytestconfig)
     rows = _resolve_rows(pytestconfig)
     fmt = _resolve_format(pytestconfig)
+    timeout = _resolve_generation_timeout(pytestconfig)
     try:
         return seedbase_client.generate(
             seedbase_project,
@@ -127,6 +163,7 @@ def seedbase_generation(
             rows=rows,
             fmt=fmt,
             wait=True,
+            timeout=timeout,
         )
     except SeedbaseError as exc:
         pytest.fail(f"SeedBase generation failed: {exc}", pytrace=False)

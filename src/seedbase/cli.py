@@ -21,6 +21,7 @@ API_URL = "https://seedba.se/api/v1"
 CONFIG_PATH = Path.home() / ".seedbase" / "config.json"
 PROJECT_CONFIG_PATH = Path.cwd() / ".seedbase.json"
 CACHE_ROOT = Path.home() / ".seedbase" / "cache"
+REQUEST_TIMEOUT = 30.0
 
 
 class CLIError(RuntimeError):
@@ -62,6 +63,9 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(0)
     try:
         args.func(args)
+    except KeyboardInterrupt:
+        print("\nAborted.", file=sys.stderr)
+        raise SystemExit(130) from None
     except CLIError as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
@@ -84,12 +88,16 @@ def _build_parser() -> argparse.ArgumentParser:
     logout.set_defaults(func=_cmd_logout)
 
     status = sub.add_parser("status", help="Show login, project and target configuration")
-    status.add_argument("--json", action="store_true")
+    status.add_argument("--json", action="store_true", help="Output as JSON")
     status.set_defaults(func=_cmd_status)
 
     projects = sub.add_parser("projects", help="List your projects")
-    projects.add_argument("--json", action="store_true")
+    projects.add_argument("--json", action="store_true", help="Output as JSON")
     projects.set_defaults(func=_cmd_projects)
+
+    connections = sub.add_parser("connections", help="List your database connections")
+    connections.add_argument("--json", action="store_true", help="Output as JSON")
+    connections.set_defaults(func=_cmd_connections)
 
     init = sub.add_parser("init", help="Set up project config (.seedbase.json)")
     init.add_argument("--project", default=None, help="Project ID (non-interactive)")
@@ -99,7 +107,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     gens = sub.add_parser("generations", help="List the generated datasets of a project")
     gens.add_argument("--project", default=None, help="Project ID (defaults to .seedbase.json)")
-    gens.add_argument("--json", action="store_true")
+    gens.add_argument("--json", action="store_true", help="Output as JSON")
     gens.set_defaults(func=_cmd_generations)
 
     pull = sub.add_parser("pull", help="Pull schema/data from the platform into your database")
@@ -107,22 +115,24 @@ def _build_parser() -> argparse.ArgumentParser:
     pull_sub.required = True
 
     ps = pull_sub.add_parser("schema", help="Create the project's tables in your target database")
-    ps.add_argument("--project", default=None)
+    ps.add_argument("--project", default=None, help="Project ID (defaults to .seedbase.json)")
     ps.add_argument("--target", default=None, help="Database URI (defaults to .seedbase.json)")
     ps.add_argument("--drop", action="store_true", help="Drop existing tables first")
     ps.add_argument("--dry-run", action="store_true", help="Show what would happen without writing")
     ps.add_argument("--to-file", default=None, help="Write DDL to a file instead of the database")
-    ps.add_argument("--wait-for-db", type=int, default=0)
+    ps.add_argument("--force", action="store_true", help="Overwrite an existing --to-file output file")
+    ps.add_argument("--wait-for-db", type=int, default=0, help="Wait up to N seconds for the database to become ready")
     ps.set_defaults(func=_cmd_pull_schema)
 
     pd = pull_sub.add_parser("data", help="Write a generated dataset into your target database")
-    pd.add_argument("--project", default=None)
+    pd.add_argument("--project", default=None, help="Project ID (defaults to .seedbase.json)")
     pd.add_argument("--target", default=None, help="Database URI (defaults to .seedbase.json)")
     pd.add_argument("--generation", "-g", default=None, help="Generation ID or name (default: newest)")
     pd.add_argument("--replace", action="store_true", help="Empty the tables before writing (avoids duplicates)")
     pd.add_argument("--dry-run", action="store_true", help="Show what would happen without writing")
     pd.add_argument("--to-file", default=None, help="Write the SQL to a file instead of the database")
-    pd.add_argument("--wait-for-db", type=int, default=0)
+    pd.add_argument("--force", action="store_true", help="Overwrite an existing --to-file output file")
+    pd.add_argument("--wait-for-db", type=int, default=0, help="Wait up to N seconds for the database to become ready")
     pd.set_defaults(func=_cmd_pull_data)
 
     psub = pull_sub.add_parser("subset", help="Carve a FK-consistent subset from a connected database")
@@ -134,47 +144,61 @@ def _build_parser() -> argparse.ArgumentParser:
     psub.add_argument("--format", default="postgresql", choices=["postgresql", "mysql", "mariadb", "sqlite"])
     psub.add_argument("--max-rows", dest="max_rows", type=int, default=None, help="Safety cap on total rows")
     psub.add_argument("--to-file", default=None, help="Write the SQL to a file instead of the database")
+    psub.add_argument("--force", action="store_true", help="Overwrite an existing --to-file output file")
     psub.add_argument("--target", default=None, help="Database URI (defaults to .seedbase.json)")
-    psub.add_argument("--wait-for-db", type=int, default=0)
+    psub.add_argument("--wait-for-db", type=int, default=0, help="Wait up to N seconds for the database to become ready")
     psub.set_defaults(func=_cmd_pull_subset)
 
     pa = pull_sub.add_parser("all", help="Pull schema + a dataset in one step")
-    pa.add_argument("--project", default=None)
+    pa.add_argument("--project", default=None, help="Project ID (defaults to .seedbase.json)")
     pa.add_argument("--target", default=None, help="Database URI (defaults to .seedbase.json)")
     pa.add_argument("--drop", action="store_true", help="Drop existing tables first")
     pa.add_argument("--dry-run", action="store_true", help="Show what would happen without writing")
     pa.add_argument("--generation", "-g", default=None, help="Generation ID or name (default: newest)")
-    pa.add_argument("--wait-for-db", type=int, default=0)
+    pa.add_argument("--wait-for-db", type=int, default=0, help="Wait up to N seconds for the database to become ready")
     pa.set_defaults(func=_cmd_pull_all)
 
     generate = sub.add_parser("generate", help="Trigger a remote generation (useful for CI/CD)")
-    generate.add_argument("--project", default=None)
-    generate.add_argument("--format", default=None, choices=["postgresql", "mysql", "mariadb", "sqlite", "csv", "json"])
-    generate.add_argument("--seed", type=int, default=None)
+    generate.add_argument("--project", default=None, help="Project ID (defaults to .seedbase.json)")
+    generate.add_argument("--format", default=None, choices=["postgresql", "mysql", "mariadb", "sqlite", "csv", "json"], help="Export format for the generation")
+    generate.add_argument("--seed", type=int, default=None, help="Deterministic generation seed")
     generate.add_argument("--rows", type=int, default=None, help="Row count per table")
-    generate.add_argument("--wait", type=int, default=120)
+    generate.add_argument("--wait", type=int, default=300, help="Seconds to wait for completion (default: 300)")
     generate.set_defaults(func=_cmd_generate)
+
+    mask = sub.add_parser("mask", help="Mask PII columns in-place in a connected database")
+    mask.add_argument("connection", help="Database connection ID (see 'seedbase connections')")
+    mask.add_argument("--table", required=True, help="Table containing the columns to mask")
+    mask.add_argument("--columns", required=True, help="Comma-separated column names (e.g. email,name)")
+    mask.add_argument("--dry-run", action="store_true", help="Preview what would be masked without writing")
+    mask.set_defaults(func=_cmd_mask)
+
+    db_push = sub.add_parser("db-push", help="Push a generated dataset into a connected database")
+    db_push.add_argument("connection", help="Database connection ID (see 'seedbase connections')")
+    db_push.add_argument("--generation", "-g", default=None, help="Generation ID (default: newest completed)")
+    db_push.set_defaults(func=_cmd_db_push)
 
     test = sub.add_parser("test", help="Test target database connectivity")
     test.set_defaults(func=_cmd_test)
 
     diff = sub.add_parser("diff", help="Show schema changes since last pull")
-    diff.add_argument("--project", default=None)
+    diff.add_argument("--project", default=None, help="Project ID (defaults to .seedbase.json)")
     diff.set_defaults(func=_cmd_diff)
 
     export = sub.add_parser("export", help="Export project configuration as a versionable file")
     export_sub = export.add_subparsers(dest="what")
     export_sub.required = True
     ec = export_sub.add_parser("config", help="Export the engine_config (config-as-code)")
-    ec.add_argument("--project", default=None)
+    ec.add_argument("--project", default=None, help="Project ID (defaults to .seedbase.json)")
     ec.add_argument("--to-file", default=None, help="Write the engine_config to a file instead of stdout")
+    ec.add_argument("--force", action="store_true", help="Overwrite an existing --to-file output file")
     ec.set_defaults(func=_cmd_export_config)
 
     imp = sub.add_parser("import", help="Import project configuration from a file")
     import_sub = imp.add_subparsers(dest="what")
     import_sub.required = True
     ic = import_sub.add_parser("config", help="Import the engine_config (config-as-code)")
-    ic.add_argument("--project", default=None)
+    ic.add_argument("--project", default=None, help="Project ID (defaults to .seedbase.json)")
     ic.add_argument("--from-file", required=True, help="Read the engine_config from this file")
     ic.set_defaults(func=_cmd_import_config)
 
@@ -192,8 +216,8 @@ def _cmd_login(args: argparse.Namespace) -> None:
     if not code or not poll_url:
         raise CLIError("Unexpected login response from server")
 
-    print("Seedbase CLI\n")
-    print(f"Open this URL to authenticate:\n{browser_url}\n")
+    _info("Seedbase CLI\n")
+    _info(f"Open this URL to authenticate:\n{browser_url}\n")
 
     if browser_url and not args.no_open:
         try:
@@ -202,7 +226,8 @@ def _cmd_login(args: argparse.Namespace) -> None:
         except Exception:
             pass
 
-    print("Waiting for authorization", end="", flush=True)
+    show_progress = sys.stdout.isatty()
+    _info("Waiting for authorization", end="" if show_progress else "\n", flush=True)
     poll_path = str(poll_url)
     if poll_path.startswith(cfg.api_url):
         poll_path = poll_path[len(cfg.api_url):]
@@ -219,15 +244,18 @@ def _cmd_login(args: argparse.Namespace) -> None:
                 raise CLIError("Authorization finished but token missing")
             cfg.token = token
             path = _save_config(cfg)
-            print(" ... authorized")
-            print(f"Token saved to {path}")
+            _info(" ... authorized" if show_progress else "Authorized.")
+            _info(f"Token saved to {path}")
             return
         if status == "expired":
-            print()
+            if show_progress:
+                _info()
             raise CLIError("Authorization code expired")
-        print(".", end="", flush=True)
+        if show_progress:
+            _info(".", end="", flush=True)
 
-    print()
+    if show_progress:
+        _info()
     raise CLIError("Authorization timed out")
 
 
@@ -291,8 +319,7 @@ def _cmd_status(args: argparse.Namespace) -> None:
 
 def _cmd_projects(args: argparse.Namespace) -> None:
     cfg = _require_auth(_load_config())
-    data = _api("GET", cfg.api_url, "/datasets/", token=cfg.token)
-    rows = _extract_results(data)
+    rows = _api_list(cfg.api_url, "/datasets/", cfg.token)
 
     if args.json:
         print(json.dumps(rows, indent=2))
@@ -312,6 +339,51 @@ def _cmd_projects(args: argparse.Namespace) -> None:
     print(f"\n{len(rows)} project{'s' if len(rows) != 1 else ''}")
 
 
+def _cmd_connections(args: argparse.Namespace) -> None:
+    cfg = _require_auth(_load_config())
+    rows = _api_list(cfg.api_url, "/db-connections/", cfg.token)
+
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return
+
+    if not rows:
+        print("No database connections found. Create one at https://seedba.se")
+        return
+
+    print(f"{'ID':<36}  {'Name':<20}  {'Type':<10}  {'Host':<24}  Database")
+    print("-" * 110)
+    for row in rows:
+        cid = str(row.get("id", ""))[:36]
+        name = str(row.get("name", ""))[:20]
+        db_type = str(row.get("db_type", ""))[:10]
+        host = str(row.get("host", ""))[:24]
+        database = str(row.get("database", ""))
+        print(f"{cid:<36}  {name:<20}  {db_type:<10}  {host:<24}  {database}")
+    print(f"\n{len(rows)} connection{'s' if len(rows) != 1 else ''}")
+
+
+def _prompt(text: str) -> str:
+    try:
+        return input(text).strip()
+    except EOFError:
+        raise CLIError(
+            "stdin is closed — cannot prompt. Run non-interactively: "
+            "seedbase init --project <id> [--target <uri>] --yes"
+        ) from None
+
+
+def _warn_if_target_has_credentials(target: str | None) -> None:
+    if not target:
+        return
+    try:
+        has_password = bool(urllib.parse.urlparse(target).password)
+    except ValueError:
+        has_password = False
+    if has_password:
+        print(f"Note: {PROJECT_CONFIG_PATH.name} contains database credentials — add it to your .gitignore.")
+
+
 def _cmd_init(args: argparse.Namespace) -> None:
     cfg = _require_auth(_load_config())
 
@@ -321,10 +393,10 @@ def _cmd_init(args: argparse.Namespace) -> None:
         project_cfg = {"project": args.project, "target": args.target or None}
         PROJECT_CONFIG_PATH.write_text(json.dumps(project_cfg, indent=2) + "\n", encoding="utf-8")
         print(f"Created {PROJECT_CONFIG_PATH}")
+        _warn_if_target_has_credentials(args.target)
         return
 
-    data = _api("GET", cfg.api_url, "/datasets/", token=cfg.token)
-    rows = _extract_results(data)
+    rows = _api_list(cfg.api_url, "/datasets/", cfg.token)
 
     if not rows:
         raise CLIError("No projects found. Create one at https://seedba.se first.")
@@ -334,7 +406,7 @@ def _cmd_init(args: argparse.Namespace) -> None:
         print(f"  [{i}] {row.get('name', 'Unnamed')} ({row.get('id', '')})")
 
     print()
-    choice = input(f"Which project? [1-{len(rows)}]: ").strip()
+    choice = _prompt(f"Which project? [1-{len(rows)}]: ")
     try:
         idx = int(choice) - 1
         if idx < 0 or idx >= len(rows):
@@ -344,7 +416,7 @@ def _cmd_init(args: argparse.Namespace) -> None:
     project_id = rows[idx].get("id")
 
     print()
-    target = input("Local database URI (e.g. postgresql://user:pass@localhost:5432/mydb): ").strip()
+    target = _prompt("Local database URI (e.g. postgresql://user:pass@localhost:5432/mydb): ")
     if not target:
         target = None
 
@@ -354,6 +426,7 @@ def _cmd_init(args: argparse.Namespace) -> None:
     }
     PROJECT_CONFIG_PATH.write_text(json.dumps(project_cfg, indent=2) + "\n", encoding="utf-8")
     print(f"\nCreated {PROJECT_CONFIG_PATH}")
+    _warn_if_target_has_credentials(target)
     if target:
         print("Run 'seedbase pull all' to create the tables and load a dataset into your DB.")
     else:
@@ -401,11 +474,13 @@ def _cmd_pull_schema(args: argparse.Namespace) -> None:
         print(f"  would CREATE {len(tables)} table(s) ({dialect})")
         return
 
+    if args.to_file and not (args.target or cfg.target):
+        _info("No target configured — defaulting to dialect 'postgresql' (pass --target to change).")
+
     sql = _build_schema_sql(cfg, project_id, dialect, drop=args.drop)
 
     if args.to_file:
-        out = Path(args.to_file)
-        out.parent.mkdir(parents=True, exist_ok=True)
+        out = _prepare_out_file(args.to_file, args.force)
         out.write_text(sql, encoding="utf-8")
         print(f"Wrote schema to {out}")
         return
@@ -424,9 +499,8 @@ def _cmd_pull_data(args: argparse.Namespace) -> None:
     generation = _resolve_generation(cfg, project_id, args.generation)
 
     if args.to_file:
-        out = Path(args.to_file)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        _download_generation(cfg, generation["id"], out)
+        out = _prepare_out_file(args.to_file, args.force)
+        _download_generation(cfg, generation, out)
         print(f"Wrote {_gen_label(generation)} to {out}")
         return
 
@@ -456,7 +530,7 @@ def _cmd_pull_data(args: argparse.Namespace) -> None:
         sql_file = Path(tmp.name)
     try:
         _info(f"Downloading {_gen_label(generation)} ...", flush=True)
-        _download_generation(cfg, generation["id"], sql_file)
+        _download_generation(cfg, generation, sql_file, force_sql=True)
         _info("Writing data to database ...", flush=True)
         _apply_sql_to_target(target, sql_file)
     finally:
@@ -494,12 +568,37 @@ def _cmd_pull_all(args: argparse.Namespace) -> None:
         sql_file = Path(tmp.name)
     try:
         _info(f"Downloading {_gen_label(generation)} ...", flush=True)
-        _download_generation(cfg, generation["id"], sql_file)
+        _download_generation(cfg, generation, sql_file, force_sql=True)
         _info("Writing data to database ...", flush=True)
         _apply_sql_to_target(target, sql_file)
     finally:
         sql_file.unlink(missing_ok=True)
     _info(f"Done.{f' {int(rows):,} rows.' if isinstance(rows, int) else ''}")
+
+
+_JOB_POLL_MAX_ERRORS = 3
+
+
+def _wait_for_tool_job(cfg, job_id: str, *, timeout_seconds: int = 1800, interval_seconds: int = 3) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    consecutive_errors = 0
+    while time.monotonic() < deadline:
+        try:
+            job = _api("GET", cfg.api_url, f"/tool-jobs/{job_id}/", token=cfg.token)
+            consecutive_errors = 0
+        except CLIError:
+            consecutive_errors += 1
+            if consecutive_errors >= _JOB_POLL_MAX_ERRORS:
+                raise
+            time.sleep(interval_seconds)
+            continue
+        job_status = str(job.get("status") or "")
+        if job_status == "completed":
+            return job.get("result") or {}
+        if job_status not in {"pending", "queued", "running"}:
+            raise CLIError(f"Tool job failed: {job.get('error_message') or job_status or 'unknown error'}")
+        time.sleep(interval_seconds)
+    raise CLIError("Timed out waiting for the tool job.")
 
 
 def _cmd_pull_subset(args: argparse.Namespace) -> None:
@@ -528,6 +627,11 @@ def _cmd_pull_subset(args: argparse.Namespace) -> None:
         token=cfg.token,
         payload=payload,
     )
+
+    job_id = result.get("job_id")
+    if job_id:
+        result = _wait_for_tool_job(cfg, str(job_id))
+
     key = result.get("key")
     if not key:
         raise CLIError("Server did not return a subset.")
@@ -537,8 +641,7 @@ def _cmd_pull_subset(args: argparse.Namespace) -> None:
     download_path = f"/db-connections/{args.from_database}/subset-download/?key={urllib.parse.quote(str(key))}"
 
     if args.to_file:
-        out = Path(args.to_file)
-        out.parent.mkdir(parents=True, exist_ok=True)
+        out = _prepare_out_file(args.to_file, args.force)
         _download_file(cfg.api_url, download_path, cfg.token, out)
         print(f"Wrote subset{rows_label} to {out}")
         return
@@ -563,6 +666,101 @@ def _cmd_generate(args: argparse.Namespace) -> None:
     cfg = _require_auth(_load_config())
     project_id = _resolve_project(cfg, args.project)
     _trigger_generation(cfg, project_id, seed=args.seed, rows=args.rows, wait=args.wait, fmt=args.format)
+
+
+def _cmd_mask(args: argparse.Namespace) -> None:
+    cfg = _require_auth(_load_config())
+    table = args.table.strip()
+    if not table:
+        raise CLIError("--table must not be empty.")
+    columns = [c.strip() for c in str(args.columns).split(",") if c.strip()]
+    if not columns:
+        raise CLIError("--columns must list at least one column (e.g. --columns email,name).")
+    qualified = [c if "." in c else f"{table}.{c}" for c in columns]
+
+    payload = {"columns": qualified, "dry_run": bool(args.dry_run)}
+
+    if args.dry_run:
+        result = _api(
+            "POST",
+            cfg.api_url,
+            f"/db-connections/{args.connection}/mask-in-place/",
+            token=cfg.token,
+            payload=payload,
+        )
+        masked_columns = result.get("columns") or []
+        row_count = result.get("row_count") or 0
+        print(f"Dry run — would mask {len(masked_columns)} column(s), {row_count} row(s):")
+        for col in masked_columns:
+            print(f"  {col}")
+        preview = result.get("preview")
+        if isinstance(preview, list) and preview:
+            print("Preview:")
+            for entry in preview[:5]:
+                print(f"  {json.dumps(entry, ensure_ascii=False, default=str)}")
+        return
+
+    _info("Masking columns in-place ...", flush=True)
+    result = _api(
+        "POST",
+        cfg.api_url,
+        f"/db-connections/{args.connection}/mask-in-place/",
+        token=cfg.token,
+        payload=payload,
+    )
+    job_id = result.get("job_id")
+    if job_id:
+        result = _wait_for_tool_job(cfg, str(job_id))
+    masked_columns = result.get("columns") or []
+    row_count = result.get("row_count") or 0
+    print(f"Masked {len(masked_columns)} column(s), {row_count} row(s).")
+
+
+def _wait_for_push_job(cfg, job_id: str, *, timeout_seconds: int = 1800, interval_seconds: int = 3) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    consecutive_errors = 0
+    while time.monotonic() < deadline:
+        try:
+            job = _api("GET", cfg.api_url, f"/push-jobs/{job_id}/", token=cfg.token)
+            consecutive_errors = 0
+        except CLIError:
+            consecutive_errors += 1
+            if consecutive_errors >= _JOB_POLL_MAX_ERRORS:
+                raise
+            time.sleep(interval_seconds)
+            continue
+        job_status = str(job.get("status") or "")
+        if job_status == "completed":
+            return job
+        if job_status not in {"queued", "running"}:
+            raise CLIError(f"Push job failed: {job.get('error_message') or job_status or 'unknown error'}")
+        time.sleep(interval_seconds)
+    raise CLIError("Timed out waiting for the push job.")
+
+
+def _cmd_db_push(args: argparse.Namespace) -> None:
+    cfg = _require_auth(_load_config())
+    payload: dict[str, Any] = {}
+    if args.generation:
+        payload["generation_id"] = args.generation
+
+    _info("Starting push to database ...", flush=True)
+    result = _api(
+        "POST",
+        cfg.api_url,
+        f"/db-connections/{args.connection}/push/",
+        token=cfg.token,
+        payload=payload,
+    )
+    job_id = result.get("job_id")
+    if not job_id:
+        raise CLIError("Server did not return a push job id.")
+    job = _wait_for_push_job(cfg, str(job_id))
+    rows_pushed = job.get("rows_pushed")
+    tables = job.get("tables_pushed")
+    rows_label = f"{int(rows_pushed):,} rows" if isinstance(rows_pushed, int) else "data"
+    tables_label = f" across {len(tables)} table(s)" if isinstance(tables, list) and tables else ""
+    print(f"Pushed {rows_label}{tables_label}.")
 
 
 def _cmd_test(_args: argparse.Namespace) -> None:
@@ -638,8 +836,7 @@ def _cmd_export_config(args: argparse.Namespace) -> None:
     engine_config = result.get("engine_config") or {}
     text = json.dumps(engine_config, indent=2) + "\n"
     if args.to_file:
-        out = Path(args.to_file)
-        out.parent.mkdir(parents=True, exist_ok=True)
+        out = _prepare_out_file(args.to_file, args.force)
         out.write_text(text, encoding="utf-8")
         print(f"Wrote engine_config to {out}")
         return
@@ -747,8 +944,7 @@ def _truncate_tables_sql(tables: list[str], dialect: str) -> str:
 
 
 def _list_generations(cfg: Config, project_id: str) -> list[dict[str, Any]]:
-    data = _api("GET", cfg.api_url, f"/generations/?dataset={urllib.parse.quote(project_id)}", token=cfg.token)
-    return _extract_results(data)
+    return _api_list(cfg.api_url, f"/generations/?dataset={urllib.parse.quote(project_id)}", cfg.token)
 
 
 def _resolve_generation(cfg: Config, project_id: str, ref: str | None) -> dict[str, Any]:
@@ -791,10 +987,12 @@ def _check_generation_dialect(generation: dict[str, Any], dialect: str) -> None:
         )
 
 
-def _download_generation(cfg: Config, generation_id: str, target: Path) -> None:
+def _download_generation(cfg: Config, generation: dict[str, Any], target: Path, *, force_sql: bool = False) -> None:
+    fmt = str(generation.get("export_format") or "").lower()
+    export_param = fmt if (not force_sql and fmt in {"csv", "json"}) else "sql"
     _download_file(
         cfg.api_url,
-        f"/generations/{generation_id}/download/?export_format=sql",
+        f"/generations/{generation['id']}/download/?export_format={export_param}",
         cfg.token,
         target,
     )
@@ -832,30 +1030,68 @@ def _trigger_generation(cfg: Config, project_id: str, *, seed: int | None, rows:
     if not generation_id:
         raise CLIError("Generation did not return an id")
 
-    print("Generating ...", flush=True)
+    _info("Generating ...", flush=True)
+    show_progress = sys.stdout.isatty()
     deadline = time.time() + max(5, wait)
-    while time.time() < deadline:
+    consecutive_errors = 0
+    while True:
+        status_data = None
+        try:
+            status_data = _api("GET", cfg.api_url, f"/generations/{generation_id}/", token=cfg.token)
+            consecutive_errors = 0
+        except CLIError:
+            consecutive_errors += 1
+            if consecutive_errors >= _JOB_POLL_MAX_ERRORS:
+                raise
+        if status_data is not None:
+            status = status_data.get("status")
+            percent = int(status_data.get("progress_percent") or 0)
+            if show_progress:
+                _info(f"  {status} {percent}%", end="\r", flush=True)
+            if status in {"completed", "failed", "cancelled"}:
+                if show_progress:
+                    _info(" " * 40, end="\r")
+                if status != "completed":
+                    raise CLIError(f"Generation {status}")
+                total = int(status_data.get("total_rows") or 0)
+                _info(f"Generated {total:,} rows. (ID {str(generation_id)[:8]})")
+                return
+        if time.time() >= deadline:
+            raise CLIError("Generation timed out")
         time.sleep(2)
-        status_data = _api("GET", cfg.api_url, f"/generations/{generation_id}/", token=cfg.token)
-        status = status_data.get("status")
-        percent = int(status_data.get("progress_percent") or 0)
-        print(f"  {status} {percent}%", end="\r", flush=True)
-        if status in {"completed", "failed", "cancelled"}:
-            print(" " * 40, end="\r")
-            if status != "completed":
-                raise CLIError(f"Generation {status}")
-            total = int(status_data.get("total_rows") or 0)
-            print(f"Generated {total:,} rows. (ID {str(generation_id)[:8]})")
-            return
-    raise CLIError("Generation timed out")
 
 
 # ── Config ────────────────────────────────────────────────────────────
 
+_LOCAL_API_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def _validate_api_url(api_url: str) -> str:
+    parsed = urllib.parse.urlparse(api_url)
+    if parsed.scheme == "https":
+        return api_url
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme == "http" and host in _LOCAL_API_HOSTS:
+        return api_url
+    raise CLIError(
+        f"Insecure API URL '{api_url}' — only https:// is allowed "
+        "(http:// is only accepted for localhost/127.0.0.1/::1)."
+    )
+
+
 def _load_config() -> Config:
     raw = _load_json(CONFIG_PATH)
     project_cfg = _load_project_config()
-    api_url = str(os.getenv("SEEDBASE_API_URL") or project_cfg.get("api_url") or raw.get("api_url") or API_URL).rstrip("/")
+    if project_cfg.get("api_url"):
+        # api_url aus der projektlokalen Datei wird ignoriert: sonst könnte ein
+        # fremdes Repo den globalen Token an eine fremde URL umleiten.
+        print(
+            f"warning: ignoring 'api_url' from {PROJECT_CONFIG_PATH} — "
+            "use SEEDBASE_API_URL or the global config instead.",
+            file=sys.stderr,
+        )
+    api_url = str(os.getenv("SEEDBASE_API_URL") or raw.get("api_url") or API_URL).rstrip("/")
+    _validate_api_url(api_url)
     token = os.getenv("SEEDBASE_TOKEN") or raw.get("token") or None
     project = project_cfg.get("project") or raw.get("default_project") or None
     target = project_cfg.get("target") or raw.get("default_target") or None
@@ -892,12 +1128,15 @@ def _resolve_target(cfg: Config) -> str | None:
 
 def _save_config(cfg: Config) -> Path:
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "token": cfg.token,
-        "api_url": cfg.api_url,
-        "default_project": cfg.project,
-        "default_target": cfg.target,
-    }
+    # Nur die wirklich globalen Schlüssel anfassen: projektlokale Werte
+    # (project/target) und Env-Werte dürfen nicht in ~/.seedbase/config.json wandern.
+    payload = _load_json(CONFIG_PATH)
+    payload["token"] = cfg.token
+    CONFIG_PATH.touch(mode=0o600, exist_ok=True)
+    try:
+        CONFIG_PATH.chmod(0o600)
+    except OSError:
+        pass
     CONFIG_PATH.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return CONFIG_PATH
 
@@ -931,25 +1170,45 @@ def _api(
     req = urllib.request.Request(url=url, method=method.upper(), headers=headers, data=data)
     allow_non_2xx = allow_non_2xx or set()
     try:
-        with urllib.request.urlopen(req) as resp:
-            raw = resp.read().decode("utf-8")
-            if not raw.strip():
-                return {}
-            return json.loads(raw)
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8") if exc.fp else ""
-        parsed: dict[str, Any] = {}
+        raw = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+        parsed: Any = {}
         if raw:
             try:
                 parsed = json.loads(raw)
             except json.JSONDecodeError:
                 parsed = {}
         if exc.code in allow_non_2xx:
-            return parsed
-        detail = parsed.get("detail") if isinstance(parsed, dict) else None
-        raise CLIError(detail or f"API request failed ({exc.code})") from exc
+            return parsed if isinstance(parsed, dict) else {}
+        raise CLIError(_http_error_message(exc.code, parsed, raw)) from exc
     except urllib.error.URLError as exc:
         raise CLIError(f"Network error: {exc.reason}") from exc
+    except (TimeoutError, OSError) as exc:
+        raise CLIError(f"Network error: {exc}") from exc
+
+    if not raw.strip():
+        return {}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise CLIError(f"Server returned an unexpected non-JSON response from {url}") from exc
+
+
+def _http_error_message(code: int, parsed: Any, raw: str) -> str:
+    detail = parsed.get("detail") if isinstance(parsed, dict) else None
+    if detail:
+        return str(detail)
+    # DRF-Feldfehler ({"root_count": [...]}, non_field_errors) sichtbar machen.
+    if isinstance(parsed, (dict, list)) and parsed:
+        snippet = json.dumps(parsed, ensure_ascii=False)
+    else:
+        snippet = raw.strip()
+    snippet = snippet[:300]
+    if snippet:
+        return f"API request failed ({code}): {snippet}"
+    return f"API request failed ({code})"
 
 
 def _download_file(api_url: str, path: str, token: str | None, target: Path) -> None:
@@ -963,21 +1222,29 @@ def _download_file(api_url: str, path: str, token: str | None, target: Path) -> 
             headers["Authorization"] = f"Token {token}"
     req = urllib.request.Request(url=url, method="GET", headers=headers)
 
+    part = target.with_name(target.name + ".part")
     try:
-        with urllib.request.urlopen(req) as resp, target.open("wb") as out:
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp, part.open("wb") as out:
             while True:
                 chunk = resp.read(64 * 1024)
                 if not chunk:
                     break
                 out.write(chunk)
+        os.replace(part, target)
     except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8") if exc.fp else ""
+        raw = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
         try:
             parsed = json.loads(raw)
         except Exception:
             parsed = {}
         detail = parsed.get("detail") if isinstance(parsed, dict) else None
         raise CLIError(detail or f"Download failed ({exc.code})") from exc
+    except urllib.error.URLError as exc:
+        raise CLIError(f"Download failed: {exc.reason}") from exc
+    except (TimeoutError, OSError) as exc:
+        raise CLIError(f"Download failed: {exc}") from exc
+    finally:
+        part.unlink(missing_ok=True)
 
 
 def _extract_results(payload: Any) -> list[dict[str, Any]]:
@@ -990,16 +1257,78 @@ def _extract_results(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
+_MAX_PAGES = 50
+
+
+def _next_page_path(next_url: str, api_url: str) -> str:
+    if next_url.startswith(api_url):
+        return next_url[len(api_url):]
+    parsed = urllib.parse.urlparse(next_url)
+    rel = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+    base_path = urllib.parse.urlparse(api_url).path
+    if base_path and rel.startswith(base_path):
+        rel = rel[len(base_path):]
+    return rel
+
+
+def _api_list(api_url: str, path: str, token: str | None) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    next_path: str | None = path
+    for _ in range(_MAX_PAGES):
+        if not next_path:
+            break
+        data = _api("GET", api_url, next_path, token=token)
+        rows.extend(_extract_results(data))
+        next_url = data.get("next") if isinstance(data, dict) else None
+        next_path = _next_page_path(str(next_url), api_url) if next_url else None
+    return rows
+
+
+def _prepare_out_file(path_str: str, force: bool) -> Path:
+    out = Path(path_str)
+    if out.exists() and not force:
+        raise CLIError(f"{out} already exists — pass --force to overwrite.")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    return out
+
+
 # ── DB operations ─────────────────────────────────────────────────────
+
+def _sqlite_path(parsed: urllib.parse.ParseResult) -> str:
+    # SQLAlchemy-Konvention: sqlite:///x.db ist relativ, sqlite:////abs/x.db absolut.
+    path = f"{parsed.netloc}{parsed.path}" if parsed.netloc else parsed.path
+    if path.startswith("/"):
+        path = path[1:]
+    if not path:
+        raise CLIError("SQLite target requires a file path")
+    return path
+
+
+def _pg_command_target(target: str) -> tuple[str, dict[str, str]]:
+    # Passwort nicht als argv übergeben (via ps sichtbar) — stattdessen PGPASSWORD.
+    parsed = urllib.parse.urlparse(target)
+    env = os.environ.copy()
+    password = urllib.parse.unquote(parsed.password or "")
+    if password:
+        env["PGPASSWORD"] = password
+    netloc = ""
+    if parsed.username:
+        netloc = f"{parsed.username}@"
+    netloc += parsed.hostname or ""
+    if parsed.port:
+        netloc += f":{parsed.port}"
+    sanitized = urllib.parse.urlunparse(
+        (parsed.scheme, netloc, parsed.path, parsed.params, parsed.query, parsed.fragment)
+    )
+    return sanitized, env
+
 
 def _test_target(target: str) -> None:
     parsed = urllib.parse.urlparse(target)
     scheme = parsed.scheme.lower()
 
     if scheme in {"sqlite", "sqlite3"}:
-        path = parsed.path
-        if not path:
-            raise CLIError("SQLite target requires a file path")
+        path = _sqlite_path(parsed)
         conn = sqlite3.connect(path)
         conn.execute("SELECT 1")
         conn.close()
@@ -1009,9 +1338,10 @@ def _test_target(target: str) -> None:
     if scheme in {"postgres", "postgresql"}:
         if shutil.which("psql") is None:
             raise CLIError("psql not found in PATH")
+        uri, env = _pg_command_target(target)
         result = subprocess.run(
-            ["psql", target, "-c", "SELECT 1"],
-            capture_output=True, text=True, check=False,
+            ["psql", uri, "-c", "SELECT 1"],
+            capture_output=True, text=True, env=env, check=False,
         )
         if result.returncode != 0:
             raise CLIError(f"Connection failed: {result.stderr.strip()}")
@@ -1065,9 +1395,7 @@ def _apply_sql_to_target(target: str, sql_file: Path) -> None:
     scheme = parsed.scheme.lower()
 
     if scheme in {"sqlite", "sqlite3"}:
-        db_path = parsed.path
-        if not db_path:
-            raise CLIError("SQLite target requires a file path")
+        db_path = _sqlite_path(parsed)
         sql = sql_file.read_text(encoding="utf-8")
         conn = sqlite3.connect(db_path)
         try:
@@ -1080,8 +1408,9 @@ def _apply_sql_to_target(target: str, sql_file: Path) -> None:
     if scheme in {"postgres", "postgresql"}:
         if shutil.which("psql") is None:
             raise CLIError("psql not found in PATH")
-        cmd = ["psql", target, "-v", "ON_ERROR_STOP=1", "-f", str(sql_file)]
-        result = subprocess.run(cmd, check=False)
+        uri, env = _pg_command_target(target)
+        cmd = ["psql", uri, "-v", "ON_ERROR_STOP=1", "-f", str(sql_file)]
+        result = subprocess.run(cmd, env=env, check=False)
         if result.returncode != 0:
             raise CLIError("psql import failed")
         return

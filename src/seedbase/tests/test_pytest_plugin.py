@@ -74,6 +74,45 @@ def test_resolve_api_url_default(monkeypatch):
     assert pytest_plugin._resolve_api_url(cfg) == pytest_plugin.API_URL
 
 
+def test_resolve_api_url_rejects_http(monkeypatch):
+    monkeypatch.setenv("SEEDBASE_API_URL", "http://evil.example/api/v1")
+    cfg = _StubConfig()
+    with pytest.raises(SeedbaseError, match="Insecure API URL"):
+        pytest_plugin._resolve_api_url(cfg)
+
+
+def test_resolve_api_url_allows_http_localhost(monkeypatch):
+    monkeypatch.setenv("SEEDBASE_API_URL", "http://localhost:8000/api/v1")
+    cfg = _StubConfig()
+    assert pytest_plugin._resolve_api_url(cfg) == "http://localhost:8000/api/v1"
+
+
+def test_resolve_generation_timeout_default(monkeypatch):
+    monkeypatch.delenv("SEEDBASE_GENERATION_TIMEOUT", raising=False)
+    cfg = _StubConfig()
+    assert pytest_plugin._resolve_generation_timeout(cfg) == pytest_plugin.DEFAULT_GENERATION_TIMEOUT
+    assert pytest_plugin.DEFAULT_GENERATION_TIMEOUT == 300
+
+
+def test_resolve_generation_timeout_from_ini(monkeypatch):
+    monkeypatch.delenv("SEEDBASE_GENERATION_TIMEOUT", raising=False)
+    cfg = _StubConfig(ini={"seedbase_generation_timeout": "600"})
+    assert pytest_plugin._resolve_generation_timeout(cfg) == 600
+
+
+def test_resolve_generation_timeout_from_env(monkeypatch):
+    monkeypatch.setenv("SEEDBASE_GENERATION_TIMEOUT", "450")
+    cfg = _StubConfig()
+    assert pytest_plugin._resolve_generation_timeout(cfg) == 450
+
+
+def test_resolve_generation_timeout_invalid_raises(monkeypatch):
+    monkeypatch.setenv("SEEDBASE_GENERATION_TIMEOUT", "soon")
+    cfg = _StubConfig()
+    with pytest.raises(SeedbaseError):
+        pytest_plugin._resolve_generation_timeout(cfg)
+
+
 def test_client_fixture_skips_without_credentials(pytester, monkeypatch):
     monkeypatch.delenv("SEEDBASE_TOKEN", raising=False)
     pytester.makepyfile(
@@ -115,8 +154,8 @@ def test_seeded_data_fixture_with_mocked_client(pytester, monkeypatch):
                 self.generate_calls = []
                 self.download_calls = []
 
-            def generate(self, project, *, seed=None, rows=None, fmt=None, wait=False):
-                self.generate_calls.append((project, seed, rows, fmt, wait))
+            def generate(self, project, *, seed=None, rows=None, fmt=None, wait=False, timeout=None):
+                self.generate_calls.append((project, seed, rows, fmt, wait, timeout))
                 return {"generation_id": "gen-9", "status": "completed"}
 
             def download(self, generation_id, fmt=None):
