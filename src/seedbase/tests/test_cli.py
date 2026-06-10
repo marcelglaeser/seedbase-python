@@ -34,7 +34,7 @@ def _json_response(payload):
 def _install_urlopen(monkeypatch, handler):
     calls = []
 
-    def fake_urlopen(req, timeout=None):
+    def fake_urlopen(req, timeout=None, context=None):
         calls.append(req)
         return handler(req, len(calls) - 1)
 

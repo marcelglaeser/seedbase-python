@@ -17,6 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ._ssl import CERTIFI_HINT, create_ssl_context, is_cert_verify_error
+
 API_URL = "https://seedba.se/api/v1"
 CONFIG_PATH = Path.home() / ".seedbase" / "config.json"
 PROJECT_CONFIG_PATH = Path.cwd() / ".seedbase.json"
@@ -1143,6 +1145,16 @@ def _save_config(cfg: Config) -> Path:
 
 # ── API helpers ───────────────────────────────────────────────────────
 
+_SSL_CONTEXT = None
+
+
+def _ssl_context():
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is None:
+        _SSL_CONTEXT = create_ssl_context()
+    return _SSL_CONTEXT
+
+
 def _api(
     method: str,
     api_url: str,
@@ -1170,7 +1182,7 @@ def _api(
     req = urllib.request.Request(url=url, method=method.upper(), headers=headers, data=data)
     allow_non_2xx = allow_non_2xx or set()
     try:
-        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT, context=_ssl_context()) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
@@ -1184,6 +1196,8 @@ def _api(
             return parsed if isinstance(parsed, dict) else {}
         raise CLIError(_http_error_message(exc.code, parsed, raw)) from exc
     except urllib.error.URLError as exc:
+        if is_cert_verify_error(exc):
+            raise CLIError(CERTIFI_HINT) from exc
         raise CLIError(f"Network error: {exc.reason}") from exc
     except (TimeoutError, OSError) as exc:
         raise CLIError(f"Network error: {exc}") from exc
@@ -1224,7 +1238,7 @@ def _download_file(api_url: str, path: str, token: str | None, target: Path) -> 
 
     part = target.with_name(target.name + ".part")
     try:
-        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp, part.open("wb") as out:
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT, context=_ssl_context()) as resp, part.open("wb") as out:
             while True:
                 chunk = resp.read(64 * 1024)
                 if not chunk:
@@ -1240,6 +1254,8 @@ def _download_file(api_url: str, path: str, token: str | None, target: Path) -> 
         detail = parsed.get("detail") if isinstance(parsed, dict) else None
         raise CLIError(detail or f"Download failed ({exc.code})") from exc
     except urllib.error.URLError as exc:
+        if is_cert_verify_error(exc):
+            raise CLIError(CERTIFI_HINT) from exc
         raise CLIError(f"Download failed: {exc.reason}") from exc
     except (TimeoutError, OSError) as exc:
         raise CLIError(f"Download failed: {exc}") from exc

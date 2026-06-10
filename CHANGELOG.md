@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.3
+
+Fixes:
+- Resolve `SSL: CERTIFICATE_VERIFY_FAILED` on macOS with python.org Python builds: the CLI and SDK now use certifi's CA bundle when the optional `certifi` package is installed (`pip install seedbase[certs]`). TLS verification is never disabled, and a clear hint is shown if a certificate error occurs.
+
 ## 0.1.2
 
 Security:

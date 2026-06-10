@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "seedbase"
-version = "0.1.2"
+version = "0.1.3"
 description = "Generate realistic test data for your databases. Schema-aware, relationship-preserving, privacy-safe."
 readme = "README.md"
 license = {text = "MIT"}
@@ -28,6 +28,9 @@ classifiers = [
     "Topic :: Software Development :: Testing",
 ]
 dependencies = []
+
+[project.optional-dependencies]
+certs = ["certifi"]
 
 [project.urls]
 Homepage = "https://seedba.se"

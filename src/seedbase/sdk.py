@@ -9,6 +9,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from ._ssl import CERTIFI_HINT, create_ssl_context, is_cert_verify_error
+
 API_URL = "https://seedba.se/api/v1"
 CONFIG_PATH = Path.home() / ".seedbase" / "config.json"
 DEFAULT_REQUEST_TIMEOUT = 30.0
@@ -123,6 +125,7 @@ class SeedbaseClient:
         self.token = resolved
         self.api_url = _validate_api_url(str(api_url).rstrip("/"))
         self.request_timeout = float(request_timeout)
+        self._ssl_context = create_ssl_context()
 
     def _request(
         self,
@@ -145,7 +148,7 @@ class SeedbaseClient:
 
         req = urllib.request.Request(url=url, method=method.upper(), headers=headers, data=data)
         try:
-            with urllib.request.urlopen(req, timeout=self.request_timeout) as resp:
+            with urllib.request.urlopen(req, timeout=self.request_timeout, context=self._ssl_context) as resp:
                 body = resp.read()
         except urllib.error.HTTPError as exc:
             body = exc.read() if exc.fp else b""
@@ -155,6 +158,8 @@ class SeedbaseClient:
                 status_code=exc.code,
             ) from exc
         except urllib.error.URLError as exc:
+            if is_cert_verify_error(exc):
+                raise SeedbaseError(CERTIFI_HINT) from exc
             raise SeedbaseError(f"Network error: {exc.reason}") from exc
         except (TimeoutError, OSError) as exc:
             raise SeedbaseError(f"Network error: {exc}") from exc
